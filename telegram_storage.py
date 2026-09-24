@@ -9,6 +9,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 from telethon.errors.rpcerrorlist import MessageNotModifiedError
 
 
@@ -22,13 +23,24 @@ API_ID = int(os.getenv("TELEGRAM_API_ID"))
 API_HASH = os.getenv("TELEGRAM_API_HASH")
 STORAGE_CHANNEL_ID = int(os.getenv("STORAGE_CHANNEL_ID"))
 
+# Render cannot answer Telethon's interactive phone/code prompts.
+# For production, provide a pre-authorized user session through this env var.
+TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING", "").strip()
 SESSION_NAME = "storage_test_session"
 
-client = TelegramClient(
-    SESSION_NAME,
-    API_ID,
-    API_HASH,
-)
+if TELEGRAM_SESSION_STRING:
+    client = TelegramClient(
+        StringSession(TELEGRAM_SESSION_STRING),
+        API_ID,
+        API_HASH,
+    )
+else:
+    # Local-development fallback: use the existing .session file.
+    client = TelegramClient(
+        SESSION_NAME,
+        API_ID,
+        API_HASH,
+    )
 
 
 # Serialize all queue read-modify-write operations in this process.
@@ -140,11 +152,27 @@ def utc_now():
 
 async def ensure_client():
     """
-    Make sure the Telethon client is connected.
+    Make sure the Telethon user client is connected and authorized.
+
+    Render has no interactive stdin, so production must use a pre-authorized
+    TELEGRAM_SESSION_STRING instead of calling client.start() and prompting
+    for a phone number, login code, or 2FA password.
     """
 
     if not client.is_connected():
-        await client.start()
+        await client.connect()
+
+    if not await client.is_user_authorized():
+        if os.getenv("RENDER", "").lower() == "true":
+            raise RuntimeError(
+                "Telegram user session is not authorized on Render. "
+                "Set TELEGRAM_SESSION_STRING in the Render environment "
+                "using a session string generated locally."
+            )
+        raise RuntimeError(
+            "Telegram user session is not authorized. "
+            "Generate/login to the local Telethon session before starting the bot."
+        )
 
 
 def parse_list(value):
