@@ -10,7 +10,7 @@ from urllib.parse import urlsplit, urlunsplit
 from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.errors.rpcerrorlist import MessageNotModifiedError
+from telethon.errors.rpcerrorlist import MessageNotModifiedError, FloodWaitError
 
 
 # ============================================================
@@ -52,6 +52,16 @@ _state_lock = asyncio.Lock()
 # Limit heartbeat writes so the Telegram state message is not edited every few seconds.
 HEARTBEAT_WRITE_INTERVAL_SECONDS = 30
 _last_heartbeat_write_monotonic = 0.0
+
+# Telegram applies flood limits to message edits. Queue/job persistence can
+# legitimately produce several edits close together, especially when multiple
+# URLs are submitted. Keep edits serialized and automatically honor Telegram's
+# server-provided FloodWait instead of allowing a transient rate limit to abort
+# the processing/publishing workflow.
+_TELEGRAM_EDIT_LOCK = asyncio.Lock()
+_TELEGRAM_EDIT_MIN_INTERVAL_SECONDS = 3.2
+_last_telegram_edit_monotonic = 0.0
+_TELEGRAM_EDIT_MAX_RETRIES = 3
 
 
 # ============================================================
@@ -715,15 +725,41 @@ async def get_storage_messages(limit=None):
 # ============================================================
 
 async def _edit_message_if_changed(message_id, text):
-    """Edit a persistent Telegram message without failing on a no-op edit."""
-    try:
-        return await client.edit_message(
-            STORAGE_CHANNEL_ID,
-            message_id,
-            text,
-        )
-    except MessageNotModifiedError:
-        return None
+    """Edit a persistent Telegram message safely under Telegram flood limits."""
+    global _last_telegram_edit_monotonic
+
+    async with _TELEGRAM_EDIT_LOCK:
+        for attempt in range(_TELEGRAM_EDIT_MAX_RETRIES + 1):
+            now = time.monotonic()
+            delay = (
+                _TELEGRAM_EDIT_MIN_INTERVAL_SECONDS
+                - (now - _last_telegram_edit_monotonic)
+            )
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+            try:
+                result = await client.edit_message(
+                    STORAGE_CHANNEL_ID,
+                    message_id,
+                    text,
+                )
+                _last_telegram_edit_monotonic = time.monotonic()
+                return result
+            except MessageNotModifiedError:
+                _last_telegram_edit_monotonic = time.monotonic()
+                return None
+            except FloodWaitError as exc:
+                _last_telegram_edit_monotonic = time.monotonic()
+                wait_seconds = max(1, int(getattr(exc, "seconds", 1)))
+                if attempt >= _TELEGRAM_EDIT_MAX_RETRIES:
+                    raise
+                print(
+                    f"⚠️ Telegram edit rate limit for message {message_id}; "
+                    f"waiting {wait_seconds}s before retry "
+                    f"({attempt + 1}/{_TELEGRAM_EDIT_MAX_RETRIES})."
+                )
+                await asyncio.sleep(wait_seconds + 1)
 
 
 # ============================================================
@@ -1245,8 +1281,10 @@ async def enqueue_instagram_url(
         job["job_id"]
     )
 
-    queue = await refresh_intake_positions()
-
+    # The intake queue itself is the source of truth for position. Do not
+    # rewrite every waiting JOB record here; doing so creates O(N) Telegram
+    # edits for every new URL and quickly triggers Telegram FloodWait.
+    queue = await get_queue()
     position = queue["intake_queue"].index(
         job["job_id"]
     ) + 1
@@ -1865,9 +1903,8 @@ async def claim_next_intake_job():
             state["last_error"] = ""
             await save_state(state)
 
-            # Refresh the remaining WAITING job positions.
-            # This only edits JOB records, not the queue manifest.
-            await refresh_intake_positions()
+            # Intake position is derived from the persistent intake_queue.
+            # Do not rewrite every remaining JOB record after each claim.
 
             return await get_job(job_id)
 
@@ -3307,7 +3344,6 @@ async def retry_job(job_id):
         ]
         await _save_queue_unlocked(queue)
 
-    await refresh_intake_positions()
     return updated
 
 
