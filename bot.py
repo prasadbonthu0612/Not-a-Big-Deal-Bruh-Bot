@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import BotCommand, MenuButtonCommands, Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -2306,6 +2306,45 @@ async def post_init(
 
     try:
         await telegram_storage.initialize_storage()
+
+        # Register the bot commands with Telegram so the command menu is
+        # available directly beside the message input, like a normal
+        # Telegram bot.  This changes only Telegram UI registration; the
+        # existing CommandHandler architecture remains unchanged.
+        bot_commands = [
+            BotCommand("start", "Start the bot"),
+            BotCommand("help", "Show all available commands"),
+            BotCommand("status", "Show automation status"),
+            BotCommand("dashboard", "Show operations dashboard"),
+            BotCommand("queue", "Show intake and publishing queues"),
+            BotCommand("pause", "Pause automatic publishing"),
+            BotCommand("resume", "Resume automatic publishing"),
+            BotCommand("interval", "Show/change publishing interval"),
+            BotCommand("limit", "Show/change daily publishing limit"),
+            BotCommand("window", "Show/change posting window"),
+            BotCommand("schedule", "Show publishing schedule"),
+            BotCommand("retry", "Retry a failed job"),
+            BotCommand("cancel", "Cancel a waiting/ready job"),
+            BotCommand("publish_now", "Publish a READY job now"),
+            BotCommand("remove", "Remove a WAITING job"),
+            BotCommand("skip", "Skip a WAITING job"),
+            BotCommand("test_instagram", "Test Instagram API"),
+            BotCommand("test_storage", "Test Telegram storage"),
+            BotCommand("storage_info", "Check storage access"),
+            BotCommand("storage_status", "Show persistent state"),
+            BotCommand("storage_report", "Audit Telegram storage"),
+            BotCommand("storage_cleanup", "Preview/clean old media"),
+        ]
+
+        await application.bot.set_my_commands(bot_commands)
+        await application.bot.set_chat_menu_button(
+            menu_button=MenuButtonCommands()
+        )
+
+        print(
+            "✅ Telegram command menu registered "
+            f"({len(bot_commands)} commands)."
+        )
 
         recovered = (
             await telegram_storage
