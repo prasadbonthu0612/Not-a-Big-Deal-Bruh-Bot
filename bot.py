@@ -32,10 +32,9 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID")
 TELEGRAM_ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "").strip()
 POSTING_TIMEZONE = os.getenv("POSTING_TIMEZONE", "Asia/Kolkata")
-try:
-    DISPLAY_TIMEZONE = ZoneInfo(POSTING_TIMEZONE)
-except Exception:
-    DISPLAY_TIMEZONE = ZoneInfo("Asia/Kolkata")
+# Scheduled timestamps are persisted in UTC, but Telegram-facing schedule
+# times must always be displayed in Indian Standard Time (IST).
+DISPLAY_TIMEZONE = ZoneInfo("Asia/Kolkata")
 
 
 # =========================
@@ -296,7 +295,7 @@ async def interval_command(
             await update.message.reply_text(
                 "⏱️ PUBLISHING INTERVAL\n\n"
                 f"Current interval: {schedule['interval_minutes']} minutes\n"
-                f"Next scheduled post: {schedule['next_post_at'] or 'Not scheduled'}\n\n"
+                f"Next scheduled post: {_format_scheduled_time(schedule['next_post_at'])}\n\n"
                 "Use /interval <minutes> to change it."
             )
             return
@@ -321,7 +320,7 @@ async def interval_command(
         await update.message.reply_text(
             "✅ Publishing interval updated and persisted.\n\n"
             f"Interval: every {schedule['interval_minutes']} minutes\n"
-            f"Next scheduled post: {schedule['next_post_at'] or 'Not scheduled'}"
+            f"Next scheduled post: {_format_scheduled_time(schedule['next_post_at'])}"
         )
 
     except Exception as e:
@@ -374,7 +373,7 @@ async def schedule_command(
             f"Interval: every {schedule['interval_minutes']} minutes\n"
             f"Posting window: {window_text}\n"
             f"Daily limit: {limit_text}\n"
-            f"Next scheduled post: {schedule['next_post_at'] or 'Not scheduled'}"
+            f"Next scheduled post: {_format_scheduled_time(schedule['next_post_at'])}"
         )
     except Exception as e:
         print(f"❌ Schedule command error: {e}")
@@ -466,7 +465,7 @@ async def dashboard_command(
             f"• Interval: {schedule['interval_minutes']} min\n"
             f"• Daily limit: {limit_text}\n"
             f"• Window: {window_text}\n"
-            f"• Next post: {schedule['next_post_at'] or 'Not scheduled'}\n\n"
+            f"• Next post: {_format_scheduled_time(schedule['next_post_at'])}\n\n"
 
             "JOBS\n"
             f"• Total: {summary['job_count']}\n"
@@ -556,7 +555,7 @@ async def status_command(
             f"• Interval: {schedule['interval_minutes']} min\n"
             f"• Daily limit: {limit_text}\n"
             f"• Window: {window}\n"
-            f"• Next post: {schedule['next_post_at'] or 'Not scheduled'}\n\n"
+            f"• Next post: {_format_scheduled_time(schedule['next_post_at'])}\n\n"
             "Jobs\n"
             f"• Total: {summary['job_count']}\n"
             f"• Waiting: {summary['waiting_jobs']}\n"
@@ -605,7 +604,7 @@ async def resume_command(
         next_post = await telegram_storage.ensure_publishing_schedule()
         await update.message.reply_text(
             "▶️ Publishing resumed.\n\n"
-            f"Next scheduled post: {next_post or 'Not scheduled'}\n"
+            f"Next scheduled post: {_format_scheduled_time(next_post)}\n"
             f"Persistent setting: {config.get('publishing_enabled')}"
         )
     except Exception as e:
@@ -853,7 +852,7 @@ async def storage_status(
             f"• Status: "
             f"{summary['worker_status']}\n"
             f"• Next post: "
-            f"{summary['next_post_at'] or 'Not scheduled'}\n"
+            f"{_format_scheduled_time(summary['next_post_at'])}\n"
             f"• Last tick: "
             f"{summary['last_tick_at'] or 'Never'}"
         )
@@ -1167,7 +1166,7 @@ async def queue_command(
             queue["publishing_job"] or "None",
             "",
             "⏱️ NEXT SCHEDULED POST",
-            schedule["next_post_at"] or "Not scheduled",
+            _format_scheduled_time(schedule["next_post_at"]),
             f"Interval: {schedule['interval_minutes']} minutes",
             f"Window: {window_text}",
         ])
@@ -1481,6 +1480,25 @@ def _progress_bar(percent, length=20):
 # the source of truth for queue/recovery state, so losing these timers on a restart
 # does not affect publishing.
 _JOB_TIMERS = {}
+
+
+def _format_scheduled_time(value):
+    """Format a persisted UTC schedule timestamp as Indian Standard Time."""
+    if not value:
+        return "Not scheduled"
+
+    raw = str(value).strip()
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(DISPLAY_TIMEZONE).strftime(
+            "%d %b %Y, %I:%M:%S %p IST"
+        )
+    except (TypeError, ValueError):
+        # Preserve the original value rather than hiding a malformed
+        # persisted timestamp.
+        return raw
 
 
 def _timestamp():
